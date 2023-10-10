@@ -4,6 +4,7 @@ import backoff
 import requests
 from environs import Env
 import telegram
+from telegram.constants import PARSEMODE_HTML
 
 LONG_POLLING_URL = 'https://dvmn.org/api/long_polling/'
 BACKOFF_EXCEPTIONS = (requests.ReadTimeout, requests.ConnectionError,
@@ -53,9 +54,19 @@ def start_polling(poller: PollingConf, params=None):
         raise ValueError(msg)
 
     if reviews['status'] == 'found':
-        print('Found!', reviews)
+        attempt = reviews['new_attempts'][0]
+
+        is_approved = not attempt['is_negative']
+        title = attempt['lesson_title']
+        url = attempt['lesson_url']
+
+        msg = ''
+        if is_approved:
+            msg = f'✅ Урок «<a href="{url}">{title}</a>» принят!'
+        else:
+            msg = f'🛠 По уроку «<a href="{url}">{title}</a>» есть замечания.'
         poller.bot.send_message(chat_id=poller.chat_id,
-                                text=f'Found! {reviews}')
+                                text=msg, parse_mode=PARSEMODE_HTML)
         return start_polling(poller)
 
     if reviews['status'] == 'timeout':
