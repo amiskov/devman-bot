@@ -8,9 +8,14 @@ import telegram
 from environs import Env
 from telegram.constants import PARSEMODE_HTML
 
+
+class DevmanValueError(ValueError):
+    ...
+
+
 LONG_POLLING_URL = 'https://dvmn.org/api/long_polling/'
 BACKOFF_EXCEPTIONS = (requests.ReadTimeout, requests.ConnectionError,
-                      requests.Timeout)
+                      requests.Timeout, ValueError, DevmanValueError)
 
 
 @dataclass
@@ -58,7 +63,7 @@ def start_polling(conf: PollingConf, params=None):
     if 'status' not in reviews:
         msg = 'Reviews status not found in server response.'
         logging.error(msg)
-        raise ValueError(msg)
+        raise DevmanValueError(msg)
 
     if reviews['status'] == 'found':
         attempt = reviews['new_attempts'][0]
@@ -82,7 +87,6 @@ def start_polling(conf: PollingConf, params=None):
         return start_polling(conf)
 
     if reviews['status'] == 'timeout':
-        print('Timeout!', reviews)
         params = {
             'timestamp': reviews['timestamp_to_request']
         }
@@ -90,7 +94,7 @@ def start_polling(conf: PollingConf, params=None):
 
     msg = f'Bad reviews status: {reviews["status"]}'
     logging.error(msg)
-    raise ValueError(msg)
+    raise DevmanValueError(msg)
 
 
 if __name__ == '__main__':
