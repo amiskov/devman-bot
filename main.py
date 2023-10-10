@@ -15,7 +15,7 @@ class DevmanValueError(ValueError):
 
 LONG_POLLING_URL = 'https://dvmn.org/api/long_polling/'
 BACKOFF_EXCEPTIONS = (requests.ReadTimeout, requests.ConnectionError,
-                      requests.Timeout, ValueError, DevmanValueError)
+                      requests.Timeout, DevmanValueError)
 
 
 @dataclass
