@@ -1,10 +1,22 @@
 import logging
+from dataclasses import dataclass
 import backoff
 import requests
 from environs import Env
 import telegram
 
 LONG_POLLING_URL = 'https://dvmn.org/api/long_polling/'
+BACKOFF_EXCEPTIONS = (requests.ReadTimeout, requests.ConnectionError,
+                      requests.Timeout)
+
+
+@dataclass
+class PollingConf:
+    url: str
+    bot: telegram.Bot
+    chat_id: int
+    headers: dict
+    timeout: int = 60
 
 
 def main():
@@ -12,49 +24,48 @@ def main():
     env.read_env()
     token = env.str('DEVMAN_API_TOKEN')
     tg_bot_token = env.str('TG_BOT_API_TOKEN')
-    tg_chat_id = env.str('TG_CHAT_ID')
+    tg_chat_id = env.int('TG_CHAT_ID')
 
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=logging.INFO
     )
 
-    bot = telegram.Bot(token=tg_bot_token)
-
-    headers = {
-        'Authorization': f'Token {token}'
-    }
-    start_polling(bot, tg_chat_id, LONG_POLLING_URL, headers=headers)
-
-
-backoff_exceptions = (requests.ReadTimeout, requests.ConnectionError,
-                      requests.Timeout)
+    conf = PollingConf(
+        url=LONG_POLLING_URL,
+        bot=telegram.Bot(token=tg_bot_token),
+        chat_id=tg_chat_id,
+        headers={'Authorization': f'Token {token}'},
+    )
+    start_polling(conf)
 
 
-@backoff.on_exception(backoff.expo, backoff_exceptions)
-def start_polling(bot: telegram.Bot, chat_id, url, headers, params=None, timeout=60):
-    resp = requests.get(url, headers=headers, timeout=timeout)
+@backoff.on_exception(backoff.expo, BACKOFF_EXCEPTIONS)
+def start_polling(poller: PollingConf, params=None):
+    resp = requests.get(poller.url, headers=poller.headers,
+                        timeout=poller.timeout)
     resp.raise_for_status()
     reviews = resp.json()
 
+    if 'status' not in reviews:
+        msg = 'Reviews status not found in server response.'
+        logging.error(msg)
+        raise ValueError(msg)
+
     if reviews['status'] == 'found':
         print('Found!', reviews)
-        bot.send_message(chat_id=chat_id, text=f'Found! {reviews}')
-        return start_polling(bot, chat_id, url, headers, params, timeout)
+        poller.bot.send_message(chat_id=poller.chat_id,
+                                text=f'Found! {reviews}')
+        return start_polling(poller)
 
     if reviews['status'] == 'timeout':
         print('Timeout!', reviews)
-        timestamp = reviews['timestamp_to_request']
         params = {
-            'timestamp': timestamp
+            'timestamp': reviews['timestamp_to_request']
         }
-        return start_polling(bot, chat_id, url, headers, params, timeout)
+        return start_polling(poller, params=params)
 
-    msg = ''
-    if 'status' in reviews:
-        msg = f'Bad reviews status: {reviews["status"]}'
-    else:
-        msg = 'Response has no reviews status not found.'
+    msg = f'Bad reviews status: {reviews["status"]}'
     logging.error(msg)
     raise ValueError(msg)
 
