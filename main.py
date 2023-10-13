@@ -1,5 +1,7 @@
 import argparse
 import logging
+from dataclasses import dataclass
+from datetime import datetime
 
 import backoff
 import requests
@@ -7,14 +9,21 @@ import telegram
 from environs import Env
 from telegram.constants import PARSEMODE_HTML
 
+BACKOFF_EXP_EXCEPTIONS = (requests.ConnectionError, requests.ConnectTimeout,
+                          requests.HTTPError)
 
-class DevmanValueError(ValueError):
-    ...
 
-
-LONG_POLLING_URL = 'https://dvmn.org/api/long_polling/'
-BACKOFF_EXCEPTIONS = (requests.ReadTimeout, requests.ConnectionError,
-                      requests.Timeout, DevmanValueError)
+@dataclass
+class PollingConf:
+    bot: telegram.Bot
+    chat_id: int
+    headers: dict
+    url: str = 'https://dvmn.org/api/long_polling/'
+    # Timestamp, начиная с которого подтягивать данные о проверках.
+    # Хранится в конфиге, чтобы состояние не терялось при перезапуске поллинг-функции
+    # в случае ошибок.
+    timestamp: float = datetime.now().timestamp()
+    timeout: int = 120
 
 
 def main():
@@ -32,60 +41,69 @@ def main():
 
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
+        level=logging.ERROR
     )
+    logging.getLogger('backoff').addHandler(logging.StreamHandler())
+    logging.getLogger('backoff').setLevel(logging.ERROR)
 
-    start_polling(
-        url=LONG_POLLING_URL,
+    conf = PollingConf(
         bot=telegram.Bot(token=tg_bot_token),
         chat_id=tg_chat_id,
         headers={'Authorization': f'Token {token}'},
+        timeout=120,
     )
+    start_polling(conf)
 
 
-@backoff.on_exception(backoff.expo, BACKOFF_EXCEPTIONS)
-def start_polling(url, bot, chat_id, headers, timeout=60):
-    params = None
+# Перезапуск функции при возникновении ошибок (https://github.com/litl/backoff):
+# - При `ReadTimeout` перезапуск произойдёт через рандомное время в пределах 1 сек.
+# - При ошибках из `BACKOFF_EXP_EXCEPTIONS` функция будет экспоненциально
+#   увеличивать интервал между попытками при каждой последующей неудаче до тех пор,
+#   пока взаимодействие с сервером не нормализуется.
+# - При `KeyError` (ответ пришёл без нужных полей) также начнутся перезапуски по
+#   экспоненте, но будет сделано только `max_tries` попыток.
+@backoff.on_exception(backoff.constant, requests.ReadTimeout)
+@backoff.on_exception(backoff.expo, BACKOFF_EXP_EXCEPTIONS)
+@backoff.on_exception(backoff.expo, KeyError, max_tries=20)
+def start_polling(conf: PollingConf):
     while True:
-        resp = requests.get(url, headers=headers,
-                            params=params, timeout=timeout)
+        resp = requests.get(
+            conf.url,
+            headers=conf.headers,
+            # Timestamp указывается всегда, чтобы в случае сбоев сети с последующей
+            # задержкой не пропустить новых оповещений.
+            params={'timestamp': conf.timestamp},
+            timeout=conf.timeout
+        )
         resp.raise_for_status()
         reviews = resp.json()
 
-        if 'status' not in reviews:
-            msg = 'Reviews status not found in server response.'
-            logging.error(msg)
-            raise DevmanValueError(msg)
-
         if reviews['status'] == 'found':
-            attempt = reviews['new_attempts'][0]
+            attempts = reviews['new_attempts']
 
-            is_approved = not attempt['is_negative']
-            title = attempt['lesson_title']
-            url = attempt['lesson_url']
+            for attempt in attempts:
+                is_approved = not attempt['is_negative']
+                title = attempt['lesson_title']
+                lesson_url = attempt['lesson_url']
 
-            msg = ''
-            if is_approved:
-                msg = f'✅ Урок «<a href="{url}">{title}</a>» принят!'
-            else:
-                msg = f'🛠 По уроку «<a href="{url}">{title}</a>» есть замечания.'
+                msg = ''
+                if is_approved:
+                    msg = f'✅ Урок «<a href="{lesson_url}">{title}</a>» принят!'
+                else:
+                    msg = f'🛠 По уроку «<a href="{lesson_url}">{title}</a>» есть замечания.'
 
-            bot.send_message(
-                chat_id=chat_id,
-                text=msg, parse_mode=PARSEMODE_HTML,
-                disable_web_page_preview=True,
-            )
+                conf.bot.send_message(
+                    chat_id=conf.chat_id,
+                    text=msg, parse_mode=PARSEMODE_HTML,
+                    disable_web_page_preview=True,
+                )
 
-            params = None
-        elif reviews['status'] == 'timeout':
-            params = {
-                'timestamp': reviews['timestamp_to_request']
-            }
+            conf.timestamp = datetime.now().timestamp()
             continue
-        else:
-            msg = f'Bad reviews status: {reviews["status"]}'
-            logging.error(msg)
-            raise DevmanValueError(msg)
+
+        if reviews['status'] == 'timeout':
+            conf.timestamp = reviews['timestamp_to_request']
+            continue
 
 
 if __name__ == '__main__':
