@@ -62,7 +62,7 @@ def main():
 #   пока взаимодействие с сервером не нормализуется.
 # - При `KeyError` (ответ пришёл без нужных полей) также начнутся перезапуски по
 #   экспоненте, но будет сделано только `max_tries` попыток.
-@backoff.on_exception(backoff.constant, requests.ReadTimeout)
+@backoff.on_exception(backoff.constant, requests.ReadTimeout, interval=0, logger=None)
 @backoff.on_exception(backoff.expo, BACKOFF_EXP_EXCEPTIONS)
 @backoff.on_exception(backoff.expo, KeyError, max_tries=20)
 def start_polling(conf: PollingConf):
